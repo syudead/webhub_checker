@@ -24,9 +24,12 @@ interface Subscription {
 const notifications: Notification[] = [];
 const subscriptions: Subscription[] = [];
 
+// Initialize KV store
+const kv = await Deno.openKv();
+
 const router = new Router();
 
-// WebHub購読
+// WebHub subscription
 router.post("/subscribe", async (ctx) => {
   const body = await ctx.request.body({ type: "json" }).value;
   const { channelId, channelTitle } = body;
@@ -44,7 +47,7 @@ router.post("/subscribe", async (ctx) => {
     createdAt: new Date().toISOString()
   };
   
-  // YouTube WebHub購読リクエスト
+  // YouTube WebHub subscription request
   const subscribeResponse = await fetch("https://pubsubhubbub.appspot.com/subscribe", {
     method: "POST",
     headers: {
@@ -60,6 +63,8 @@ router.post("/subscribe", async (ctx) => {
   });
   
   if (subscribeResponse.ok) {
+    // Save to both KV and memory
+    await kv.set(["subscriptions", subscription.id], subscription);
     subscriptions.push(subscription);
     ctx.response.body = { success: true, subscription };
   } else {
@@ -68,11 +73,11 @@ router.post("/subscribe", async (ctx) => {
   }
 });
 
-// WebHub通知受信
+// WebHub notification reception
 router.post("/webhook", async (ctx) => {
   const body = await ctx.request.body({ type: "text" }).value;
   
-  // XMLをパース（簡単な実装）
+  // Parse XML (simple implementation)
   const videoIdMatch = body.match(/<yt:videoId>([^<]+)<\/yt:videoId>/);
   const titleMatch = body.match(/<title>([^<]+)<\/title>/);
   const channelIdMatch = body.match(/<yt:channelId>([^<]+)<\/yt:channelId>/);
@@ -90,18 +95,24 @@ router.post("/webhook", async (ctx) => {
       receivedAt: new Date().toISOString()
     };
     
+    // Save to both KV and memory
+    await kv.set(["notifications", notification.id], notification);
     notifications.unshift(notification);
     
-    // 最新100件のみ保持
+    // Keep only latest 100 notifications
     if (notifications.length > 100) {
-      notifications.splice(100);
+      const removedNotifications = notifications.splice(100);
+      // Delete old notifications from KV as well
+      for (const oldNotification of removedNotifications) {
+        await kv.delete(["notifications", oldNotification.id]);
+      }
     }
   }
   
   ctx.response.body = "OK";
 });
 
-// WebHub購読確認
+// WebHub subscription verification
 router.get("/webhook", (ctx) => {
   const challenge = ctx.request.url.searchParams.get("hub.challenge");
   if (challenge) {
@@ -111,22 +122,66 @@ router.get("/webhook", (ctx) => {
   }
 });
 
-// 通知一覧取得API
+// API to get notification list
 router.get("/api/notifications", (ctx) => {
   ctx.response.body = notifications;
 });
 
-// 購読一覧取得API
+// API to get subscription list
 router.get("/api/subscriptions", (ctx) => {
   ctx.response.body = subscriptions;
 });
 
-// 静的ファイル配信
+// Static file serving
 router.get("/", async (ctx) => {
   const content = await Deno.readTextFile("./index.html");
   ctx.response.headers.set("Content-Type", "text/html");
   ctx.response.body = content;
 });
+
+// Data restoration at startup
+async function initializeData() {
+  console.log("Initializing data from KV store...");
+  
+  // Restore subscription data
+  const subscriptionEntries = kv.list({ prefix: ["subscriptions"] });
+  for await (const entry of subscriptionEntries) {
+    const subscription = entry.value as Subscription;
+    // Check expiration
+    if (new Date(subscription.expiresAt) > new Date()) {
+      subscriptions.push(subscription);
+    } else {
+      // Delete expired subscriptions
+      await kv.delete(entry.key);
+    }
+  }
+  
+  // Restore notification data
+  const notificationEntries = kv.list({ prefix: ["notifications"] });
+  const tempNotifications: Notification[] = [];
+  for await (const entry of notificationEntries) {
+    tempNotifications.push(entry.value as Notification);
+  }
+  
+  // Sort by received time (newest first)
+  tempNotifications.sort((a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime());
+  
+    // Keep only latest 100 notifications
+  const keepNotifications = tempNotifications.slice(0, 100);
+  notifications.push(...keepNotifications);
+  
+  // Delete old notifications exceeding 100 from KV
+  if (tempNotifications.length > 100) {
+    for (let i = 100; i < tempNotifications.length; i++) {
+      await kv.delete(["notifications", tempNotifications[i].id]);
+    }
+  }
+  
+  console.log(`Restored ${subscriptions.length} subscriptions and ${notifications.length} notifications`);
+}
+
+// Execute data initialization
+await initializeData();
 
 const app = new Application();
 app.use(router.routes());
