@@ -31,7 +31,7 @@ const router = new Router();
 
 // WebHub subscription
 router.post("/subscribe", async (ctx) => {
-  const body = await ctx.request.body({ type: "json" }).value;
+  const body = await ctx.request.body.json();
   const { channelId, channelTitle } = body;
   
   const hubTopic = `https://www.youtube.com/xml/feeds/videos.xml?channel_id=${channelId}`;
@@ -75,7 +75,7 @@ router.post("/subscribe", async (ctx) => {
 
 // WebHub notification reception
 router.post("/webhook", async (ctx) => {
-  const body = await ctx.request.body({ type: "text" }).value;
+  const body = await ctx.request.body.text();
   
   // Parse XML (simple implementation)
   const videoIdMatch = body.match(/<yt:videoId>([^<]+)<\/yt:videoId>/);
